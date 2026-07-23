@@ -69,7 +69,7 @@ Studio `.mcp.json`):
     "FileMcp": {
       "type": "stdio",
       "command": "dotnet",
-      "args": [ "run", "--project", "<PATH TO PROJECT DIRECTORY>" ]
+      "args": [ "run", "--project", "FileMcp/FileMcp.csproj" ]
     }
   }
 }
