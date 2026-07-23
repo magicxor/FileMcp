@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "description": "<your description here>",
+  "description": "MCP server exposing a single policy-guarded 'move_file' tool for moving a file between directories.",
   "name": "io.github.<your GitHub username here>/<your repo name>",
   "version": "0.1.0-beta",
   "packages": [
