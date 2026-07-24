@@ -4,19 +4,44 @@ namespace FileMcp.Validation;
 /// Pure (no-IO) validation helpers for the arguments accepted by the move tool.
 /// Every failure throws a <see cref="FileMoveException"/> whose message explains, in plain
 /// terms, exactly what is wrong so the calling agent can correct the request.
+/// <para>
+/// The rules are deliberately <b>platform-independent</b>: the server runs on Linux, but a
+/// moved file's name may travel onward (e.g. through Telegram) and end up on the user's
+/// machine, which may be Windows. The validation therefore does not depend on the current OS
+/// (unlike <see cref="Path.GetInvalidFileNameChars"/> / <see cref="Path.IsPathFullyQualified"/>,
+/// which behave differently on Linux and Windows) so it yields the same verdict everywhere,
+/// including on CI.
+/// </para>
 /// </summary>
 public static class PathValidator
 {
-    private static readonly char[] Separators =
+    private static readonly char[] Separators = { '/', '\\' };
+
+    /// <summary>
+    /// Characters that are unsafe in a file name (or a path segment) on any platform this tool
+    /// touches. It is the Windows-invalid set — control characters plus
+    /// <c>&lt; &gt; : " / \ | ? *</c> — which is a superset of the POSIX one (just <c>/</c>),
+    /// so a name that passes here stays valid on Linux, in Telegram, and on the user's Windows box.
+    /// </summary>
+    private static readonly char[] InvalidNameChars =
+        [.. Enumerable.Range(0, 32).Select(static i => (char)i), '<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+    /// <summary>
+    /// Names reserved by Windows regardless of extension (e.g. "CON", "CON.txt"). Rejected so a
+    /// file created on Linux does not become un-saveable once it reaches a Windows machine.
+    /// </summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        Path.DirectorySeparatorChar,
-        Path.AltDirectorySeparatorChar,
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
 
     /// <summary>
-    /// Validates a bare file name: non-empty, not "." or "..", and free of characters that
-    /// are invalid in a file name (which also rules out directory separators, so no path
-    /// component can be smuggled in through this argument).
+    /// Validates a bare file name: non-empty, not made up solely of dots, free of characters that
+    /// are unsafe on any target platform (which also rules out directory separators, so no path
+    /// component can be smuggled in), not a reserved Windows device name, and not ending in a
+    /// space or dot (which Windows silently strips).
     /// </summary>
     public static void ValidateFileName(string fileName)
     {
@@ -25,31 +50,42 @@ public static class PathValidator
             throw new FileMoveException("fileName must not be empty.");
         }
 
-        if (fileName is "." or "..")
-        {
-            throw new FileMoveException("fileName must be a real file name, not '.' or '..'.");
-        }
-
-        if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        if (fileName.Trim('.').Length == 0)
         {
             throw new FileMoveException(
-                $"fileName '{fileName}' contains invalid characters or a path separator; " +
-                "it must be a single file name including its extension (for example 'report.pdf').");
+                $"fileName '{fileName}' must be a real file name, not '.', '..' or a string of only dots.");
         }
 
-        // Defense in depth: reject anything that is not exactly its own file name.
-        if (!string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+        if (fileName.IndexOfAny(InvalidNameChars) >= 0)
         {
             throw new FileMoveException(
-                $"fileName '{fileName}' must not contain any directory component.");
+                $"fileName '{fileName}' contains a path separator or a character that is not allowed in a file " +
+                "name on Windows/Telegram (any of < > : \\\" / \\ | ? * or a control character); it must be a " +
+                "single portable file name including its extension (for example 'report.pdf').");
+        }
+
+        if (fileName[^1] is '.' or ' ')
+        {
+            throw new FileMoveException(
+                $"fileName '{fileName}' must not end with a space or a dot; Windows silently trims those, which " +
+                "would rename the file or cause a collision.");
+        }
+
+        var stem = fileName.Split('.', 2)[0];
+        if (ReservedDeviceNames.Contains(stem))
+        {
+            throw new FileMoveException(
+                $"fileName '{fileName}' uses a name reserved by Windows ('{stem}'); choose a different name.");
         }
     }
 
     /// <summary>
-    /// Validates a directory argument: must be an absolute (rooted, fully-qualified) path,
-    /// contain no invalid characters, and contain no "." or ".." segment. The raw string is
+    /// Validates a directory argument: it must be an absolute (rooted) path — in POSIX form
+    /// ('/srv/out'), Windows drive form ('C:\data\out') or UNC form ('\\server\share') — contain
+    /// no unsafe characters, and contain no empty, "."/".." or all-dots segment. The raw string is
     /// validated as-is; it is intentionally never normalized with <see cref="Path.GetFullPath"/>,
-    /// because normalization would silently collapse ".." instead of rejecting it.
+    /// because normalization would silently collapse ".." instead of rejecting it. The check is
+    /// OS-independent, so the same string is accepted or rejected identically on Linux and Windows.
     /// </summary>
     /// <param name="path">The directory path to validate.</param>
     /// <param name="argName">Argument name used in error messages (e.g. "sourceDirectory").</param>
@@ -60,38 +96,76 @@ public static class PathValidator
             throw new FileMoveException($"{argName} must not be empty.");
         }
 
-        if (!Path.IsPathFullyQualified(path))
+        var body = StripAbsoluteRoot(path);
+        if (body is null)
         {
             throw new FileMoveException(
-                $"{argName} must be an absolute, rooted path (for example 'C:\\data\\out'). " +
-                $"'{path}' is not fully qualified.");
+                $"{argName} must be an absolute, rooted path (for example '/srv/out' or 'C:\\data\\out'). " +
+                $"'{path}' is not rooted.");
         }
 
-        if (path.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+        // A single trailing separator is benign ('/srv/out/'); drop exactly one. A doubled trailing
+        // separator survives as an empty segment below and is rejected.
+        if (body.Length > 0 && Array.IndexOf(Separators, body[^1]) >= 0)
         {
-            throw new FileMoveException($"{argName} '{path}' contains invalid path characters.");
+            body = body[..^1];
         }
 
-        // Split off the root (e.g. "C:\" or "\\server\share\") and inspect the remaining
-        // segments only; the root legitimately contains ':' which is not a valid file-name char.
-        var root = Path.GetPathRoot(path) ?? string.Empty;
-        var remainder = path[root.Length..];
-        var segments = remainder.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
-
-        var invalidNameChars = Path.GetInvalidFileNameChars();
-        foreach (var segment in segments)
+        if (body.Length == 0)
         {
-            if (segment is "." or "..")
+            return; // Path is just the root, e.g. '/' or 'C:\'.
+        }
+
+        // Do NOT use RemoveEmptyEntries: an empty segment (a double separator) is trash we reject.
+        foreach (var segment in body.Split(Separators))
+        {
+            if (segment.Length == 0)
             {
                 throw new FileMoveException(
-                    $"{argName} '{path}' must not contain '.' or '..' path segments.");
+                    $"{argName} '{path}' must not contain empty path segments (e.g. from a double separator).");
             }
 
-            if (segment.IndexOfAny(invalidNameChars) >= 0)
+            if (segment.Trim('.').Length == 0)
+            {
+                throw new FileMoveException(
+                    $"{argName} '{path}' must not contain '.', '..' or all-dots path segments.");
+            }
+
+            if (segment.IndexOfAny(InvalidNameChars) >= 0)
             {
                 throw new FileMoveException(
                     $"{argName} '{path}' contains an invalid character in segment '{segment}'.");
             }
         }
+    }
+
+    /// <summary>
+    /// If <paramref name="path"/> is an absolute path in a recognised form, returns the portion
+    /// after its root (which may be empty for a bare root such as '/' or 'C:\'). Returns
+    /// <see langword="null"/> for a relative or drive-relative path ('out', 'C:', 'C:rel', '\rel').
+    /// </summary>
+    private static string? StripAbsoluteRoot(string path)
+    {
+        // Windows drive-absolute: 'X:\...' or 'X:/...'. A bare 'X:' or 'X:rel' is drive-relative.
+        if (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':'
+            && Array.IndexOf(Separators, path[2]) >= 0)
+        {
+            return path[3..];
+        }
+
+        // UNC: '\\server\share\...'. Strip the leading '\\'; server and share validate as segments.
+        if (path.Length >= 2 && path[0] == '\\' && path[1] == '\\')
+        {
+            return path[2..];
+        }
+
+        // POSIX-absolute: '/srv/out'. A single leading '\' is deliberately NOT accepted — on Windows
+        // that is a drive-relative path, so treating it as absolute would be misleading.
+        if (path[0] == '/')
+        {
+            return path[1..];
+        }
+
+        return null;
     }
 }

@@ -37,8 +37,8 @@ Settings live under the `FileMove` section:
 ```json
 {
   "FileMove": {
-    "AllowedSourcePatterns": [ "^[A-Za-z]:\\\\Temp\\\\Mcp\\\\In(\\\\.*)?$" ],
-    "AllowedTargetPatterns": [ "^[A-Za-z]:\\\\Temp\\\\Mcp\\\\Out(\\\\.*)?$" ],
+    "AllowedSourcePatterns": [ "^/tmp/mcp/in(/.*)?$" ],
+    "AllowedTargetPatterns": [ "^/tmp/mcp/out(/.*)?$" ],
     "MaxFileAgeSeconds": 600
   }
 }
@@ -52,11 +52,12 @@ Settings live under the `FileMove` section:
 Invalid regexes or a non-positive `MaxFileAgeSeconds` fail fast at startup with a clear
 message.
 
-### Regex escaping note (Windows paths)
+### Path form
 
-One literal backslash in a Windows path is `\\` in a regular expression, which is `\\\\`
-inside a JSON string. So `^C:\\\\Temp\\\\Mcp\\\\In(\\\\.*)?$` in JSON is the regex
-`^C:\\Temp\\Mcp\\In(\\.*)?$`, which matches `C:\Temp\Mcp\In` and anything beneath it.
+The server targets Linux, so the patterns are ordinary POSIX paths with `/` separators and
+need no escaping — e.g. `^/tmp/mcp/in(/.*)?$` matches `/tmp/mcp/in` and anything beneath it.
+(If you ever point this at Windows paths, remember one literal backslash is `\\` in a regex,
+which is `\\\\` inside a JSON string.)
 
 ## Developing / running locally
 
